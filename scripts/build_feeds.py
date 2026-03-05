@@ -121,9 +121,6 @@ def build_rss(slug, name):
     with open(f"feed-{slug}.xml", "w", encoding="utf-8") as f:
         f.write(rss)
 
-    with open(f"feed-{show_slug}.xml", "w", encoding="utf-8") as f:
-        f.write(rss)
-
 def main():
     for slug, name in SHOWS.items():
         build_rss(slug, name)
