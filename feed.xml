@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0"
+     xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd"
+     xmlns:podcast="https://podcastindex.org/namespace/1.0">
+  <channel>
+
+    <title>RT Private Aggregated Feed</title>
+    <link>https://duck-scout.github.io/rt-private-feed/</link>
+    <description>Aggregated RT audio episodes for private use.</description>
+    <language>en-us</language>
+
+    <!-- Show Artwork (must be hosted somewhere public) -->
+    <itunes:image href="https://duck-scout.github.io/rt-private-feed/artwork.jpg"/>
+
+    <itunes:author>RT</itunes:author>
+    <itunes:explicit>false</itunes:explicit>
+    <itunes:type>episodic</itunes:type>
+
+    <!-- ===== EPISODES START BELOW THIS LINE ===== -->
+
+    <item>
+      <title>Sample Episode Title</title>
+      <description><![CDATA[
+        <p>Full episode description here.</p>
+        <p><strong>Show:</strong> America First</p>
+      ]]></description>
+      <itunes:summary>Short summary version here.</itunes:summary>
+      <pubDate>Mon, 04 Mar 2026 12:00:00 GMT</pubDate>
+      <guid>america-first-2026-03-04</guid>
+      <enclosure url="https://example.com/audiofile.mp3"
+                 length="12345678"
+                 type="audio/mpeg"/>
+
+      <!-- Optional Episode Artwork -->
+      <itunes:image href="https://YOURUSERNAME.github.io/rt-private-feed/episode1.jpg"/>
+
+      <!-- Chapters (Pocket Casts supports this namespace) -->
+      <podcast:chapters url="https://YOURUSERNAME.github.io/rt-private-feed/episode1-chapters.json" type="application/json"/>
+
+    </item>
+
+  </channel>
+</rss>
