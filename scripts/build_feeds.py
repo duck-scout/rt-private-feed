@@ -1,6 +1,7 @@
 import requests
 from bs4 import BeautifulSoup
-from datetime import datetime
+from datetime import timezone
+datetime.now(timezone.utc)
 import hashlib
 import re
 import os
@@ -21,16 +22,27 @@ def fetch(url):
     return r.text
 
 def get_episode_links(slug):
-    url = f"{BASE_URL}/shows/{slug}/"
+    url = f"{BASE}/shows/{slug}/"
     html = fetch(url)
     soup = BeautifulSoup(html, "html.parser")
 
     links = []
-    for a in soup.find_all("a", href=True):
-        if f"/shows/{slug}/" in a["href"] and re.search(r'/\d+-', a["href"]):
-            links.append(BASE_URL + a["href"])
 
-    return list(set(links))[:20]
+    for a in soup.find_all("a", href=True):
+        href = a["href"]
+
+        # Must be internal relative link
+        if not href.startswith(f"/shows/{slug}/"):
+            continue
+
+        # Must look like episode URL with numeric ID
+        if not re.search(r"/\d+-", href):
+            continue
+
+        full_url = BASE + href
+        links.append(full_url)
+
+    return list(set(links))[:15]
 
 def extract_episode_data(url):
     html = fetch(url)
