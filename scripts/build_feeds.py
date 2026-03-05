@@ -5,7 +5,7 @@ import hashlib
 import re
 import os
 
-BASE_URL = "https://www.rt.com"
+BASE = "https://www.rt.com"
 HEADERS = {"User-Agent": "Mozilla/5.0"}
 
 # Add more shows here later
