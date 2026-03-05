@@ -97,14 +97,20 @@ def build_rss(show_slug, show_name):
         </item>
         """
 
-    rss = f"""<?xml version="1.0" encoding="UTF-8"?>
+  art_url = f"https://duck-scout.github.io/rt-private-feed/art-{slug}.jpg"
+
+rss = f"""<?xml version="1.0" encoding="UTF-8"?>
 <rss version="2.0"
      xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd">
   <channel>
-    <title>{show_name} - Private Feed</title>
-    <link>{BASE}/shows/{show_slug}/</link>
-    <description>Auto-generated private feed for {show_name}</description>
+    <title>{name} - Private Feed</title>
+    <link>{BASE}/shows/{slug}/</link>
+    <description>Auto-generated private feed for {name}</description>
     <language>en-us</language>
+    <itunes:author>RT</itunes:author>
+    <itunes:explicit>false</itunes:explicit>
+    <itunes:type>episodic</itunes:type>
+    <itunes:image href="{art_url}"/>
     {items}
   </channel>
 </rss>
