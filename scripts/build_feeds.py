@@ -1,6 +1,6 @@
 import requests
 from bs4 import BeautifulSoup
-from datetime import datetime
+from datetime import datetime, timezone
 import hashlib
 import re
 import os
@@ -56,8 +56,7 @@ def extract_episode_data(url):
     description = desc_tag["content"] if desc_tag else ""
 
     # Publish date
-    pub_date = from datetime import timezone
-    datetime.now(timezone.utc)
+    pub_date = datetime.now(timezone.utc).strftime("%a, %d %b %Y %H:%M:%S GMT")
 
     # MP3
     mp3_match = re.search(r'https://mf\.b37mrtl\.ru/files/.*?\.mp3', html)
