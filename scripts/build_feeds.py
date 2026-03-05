@@ -102,7 +102,7 @@ def build_rss(show_slug, show_name):
      xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd">
   <channel>
     <title>{show_name} - Private Feed</title>
-    <link>{BASE_URL}/shows/{show_slug}/</link>
+    <link>{BASE}/shows/{show_slug}/</link>
     <description>Auto-generated private feed for {show_name}</description>
     <language>en-us</language>
     {items}
