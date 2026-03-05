@@ -75,16 +75,18 @@ def extract_episode_data(url):
         "guid": hashlib.md5(url.encode()).hexdigest()
     }
 
-def build_rss(show_slug, show_name):
-    episodes = get_episode_links(show_slug)
+def build_rss(slug, name):
+    episodes = get_episode_links(slug)
     items = ""
 
-    for ep_url in episodes:
-        data = extract_episode_data(ep_url)
+    for ep in episodes:
+        data = extract_episode_data(ep)
         if not data["mp3"]:
             continue
 
-        art_xml = f'<itunes:image href="{data["artwork"]}"/>' if data["artwork"] else ""
+        art_xml = ""
+        if data["artwork"]:
+            art_xml = f'<itunes:image href="{data["artwork"]}"/>'
 
         items += f"""
         <item>
@@ -97,9 +99,9 @@ def build_rss(show_slug, show_name):
         </item>
         """
 
-  art_url = f"https://duck-scout.github.io/rt-private-feed/art-{slug}.jpg"
+    art_url = f"https://duck-scout.github.io/rt-private-feed/art-{slug}.jpg"
 
-rss = f"""<?xml version="1.0" encoding="UTF-8"?>
+    rss = f"""<?xml version="1.0" encoding="UTF-8"?>
 <rss version="2.0"
      xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd">
   <channel>
@@ -115,6 +117,9 @@ rss = f"""<?xml version="1.0" encoding="UTF-8"?>
   </channel>
 </rss>
 """
+
+    with open(f"feed-{slug}.xml", "w", encoding="utf-8") as f:
+        f.write(rss)
 
     with open(f"feed-{show_slug}.xml", "w", encoding="utf-8") as f:
         f.write(rss)
