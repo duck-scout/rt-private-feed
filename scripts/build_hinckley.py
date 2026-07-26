@@ -1,6 +1,6 @@
 import requests
 from bs4 import BeautifulSoup
-from datetime import datetime
+from datetime import datetime, timezone
 from email.utils import format_datetime
 import hashlib
 import html
@@ -244,7 +244,7 @@ def extract_metadata(url, fallback_title):
         # October = first Saturday of October.
         # We use the first day of the month for feed sorting only,
         # then preserve the conference label in the description.
-        pub_dt = datetime(year, month, day)
+        pub_dt = datetime(year, month, day, tzinfo=timezone.utc)
     else:
         pub_dt = datetime(1970, 1, 1)
 
