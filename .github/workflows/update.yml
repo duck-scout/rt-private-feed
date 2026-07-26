@@ -20,8 +20,11 @@ jobs:
       - name: Install dependencies
         run: pip install requests beautifulsoup4
 
-      - name: Run scraper
+      - name: Run RT scraper
         run: python scripts/build_feeds.py
+
+      - name: Run Hinckley archive builder
+        run: python scripts/build_hinckley.py      
 
       - name: Commit and push changes
         run: |
