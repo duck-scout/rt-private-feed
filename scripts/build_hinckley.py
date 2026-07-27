@@ -43,7 +43,7 @@ HEADERS = {
     )
 }
 
-OUTPUT_FILE = "feed-gordon-b-hinckley.xml"
+OUTPUT_FILE = "feed-hinckley-complete.xml"
 
 # Set to an integer (e.g. 4000) to truncate transcripts in episode
 # descriptions and keep the feed XML small. None = full transcript.
