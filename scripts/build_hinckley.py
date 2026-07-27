@@ -1,12 +1,15 @@
-"""Build a podcast RSS feed of Gordon B. Hinckley General Conference talks.
+"""Build a podcast RSS feed of Gordon B. Hinckley talks from two sources:
 
-Audio discovery uses the Church's own JSON content API (the same one the
-website's audio player calls), instead of regex-scraping the raw HTML:
+1. General Conference talks (1971-2007) from churchofjesuschrist.org.
+   Audio discovery uses the Church's own JSON content API (the same one
+   the website's audio player calls):
+       /study/api/v3/language-pages/type/content?lang=eng&uri=<talk-uri>
 
-    /study/api/v3/language-pages/type/content?lang=eng&uri=<talk-uri>
+2. BYU devotionals, firesides, and addresses (1958-2007) from
+   speeches.byu.edu. Here the MP3 URL, transcript, and date are all in
+   the static page HTML, so plain scraping works.
 
-The API response contains meta.audio[].mediaUrl (a direct media2.ldscdn.org
-MP3) plus title, and a content body with the transcript HTML.
+Both sources merge into one chronological feed.
 """
 
 import hashlib
@@ -27,6 +30,9 @@ ARCHIVE_URL = (
     "speakers/gordon-b-hinckley?lang=eng"
 )
 API_URL = BASE + "/study/api/v3/language-pages/type/content"
+
+BYU_BASE = "https://speeches.byu.edu"
+BYU_SPEAKER_URL = BYU_BASE + "/speakers/gordon-b-hinckley/"
 
 PAGES_URL = "https://duck-scout.github.io/rt-private-feed"
 
@@ -260,6 +266,141 @@ def extract_metadata(uri, fallback_title):
     }
 
 
+def get_byu_links():
+    """Scrape the BYU Speeches speaker page for Hinckley talk URLs."""
+    print("\nFetching BYU Speeches speaker archive...")
+    page = fetch_text(BYU_SPEAKER_URL)
+    soup = BeautifulSoup(page, "html.parser")
+
+    links = set()
+    for a in soup.find_all("a", href=True):
+        href = a["href"].split("?")[0].split("#")[0]
+        if "/talks/gordon-b-hinckley/" in href:
+            full = urljoin(BYU_BASE, href)
+            if not full.rstrip("/").endswith("/talks/gordon-b-hinckley"):
+                links.add(full.rstrip("/") + "/")
+
+    result = sorted(links)
+    print(f"Found {len(result)} BYU speech pages.")
+    return result
+
+
+BYU_DATE_RE = re.compile(
+    r"(January|February|March|April|May|June|July|August|September|"
+    r"October|November|December)\s+(\d{1,2}),\s+(\d{4})"
+)
+MONTHS = {m: i for i, m in enumerate(
+    ["January", "February", "March", "April", "May", "June", "July",
+     "August", "September", "October", "November", "December"], start=1)}
+
+
+def extract_byu_metadata(url):
+    print(f"Processing (BYU): {url}")
+    page_html = fetch_text(url)
+    soup = BeautifulSoup(page_html, "html.parser")
+
+    # Title
+    og_title = soup.find("meta", property="og:title")
+    h1 = soup.find("h1")
+    title = clean_text(
+        (og_title.get("content") if og_title else None)
+        or (h1.get_text(" ", strip=True) if h1 else None)
+    ) or "Gordon B. Hinckley"
+
+    # Audio: mp3 URLs are in the static HTML on BYU pages.
+    audio_urls = []
+    for match in re.findall(
+        r'https?://[^"\'>\s]+?\.(?:mp3|m4a)(?:\?[^"\'>\s]*)?',
+        page_html, re.IGNORECASE,
+    ):
+        u = html.unescape(match)
+        if u not in audio_urls:
+            audio_urls.append(u)
+    preferred = [u for u in audio_urls if "speeches.byu.edu" in u or "byu.edu" in u]
+    audio_url = (preferred or audio_urls or [None])[0]
+    if not audio_url:
+        print(f"  WARNING: No audio URL found on {url}")
+
+    # Date: prefer the article:published_time meta tag (ISO, reflects the
+    # original speech date), fall back to a "Month D, YYYY" in the page.
+    pub_dt = None
+    meta_time = soup.find("meta", property="article:published_time")
+    if meta_time and meta_time.get("content"):
+        try:
+            pub_dt = datetime.fromisoformat(
+                meta_time["content"].replace("Z", "+00:00")
+            ).astimezone(timezone.utc)
+        except ValueError:
+            pub_dt = None
+    if pub_dt is None:
+        text = soup.get_text(" ", strip=True)
+        m = BYU_DATE_RE.search(text[:4000])
+        if m:
+            pub_dt = datetime(
+                int(m.group(3)), MONTHS[m.group(1)], int(m.group(2)),
+                tzinfo=timezone.utc,
+            )
+    if pub_dt is None:
+        pub_dt = datetime(1970, 1, 1, tzinfo=timezone.utc)
+        print(f"  WARNING: No date found on {url}")
+
+    # Event type (Devotional, Fireside, Commencement, ...) from the
+    # category link near the title, e.g. /talks?event=devotional
+    event = "BYU Speech"
+    event_link = soup.find("a", href=re.compile(r"[?&]event="))
+    if event_link:
+        label = clean_text(event_link.get_text(" ", strip=True))
+        if label:
+            event = f"BYU {label}"
+
+    occasion = f"{event} — {pub_dt.strftime('%B %-d, %Y')}"
+
+    # Transcript: WordPress article body.
+    container = None
+    for class_name in ["entry-content", "post-content", "speech-content"]:
+        container = soup.find(class_=re.compile(re.escape(class_name), re.IGNORECASE))
+        if container:
+            break
+    if not container:
+        container = soup.find("article") or soup.find("main")
+
+    if container:
+        transcript_html = container.decode_contents()
+    else:
+        meta_desc = soup.find("meta", attrs={"name": "description"})
+        desc = meta_desc.get("content", "") if meta_desc else ""
+        transcript_html = f"<p>{html.escape(desc)}</p>"
+
+    transcript_soup = BeautifulSoup(transcript_html, "html.parser")
+    for tag in transcript_soup.find_all(
+        ["script", "style", "nav", "form", "button", "video", "audio", "iframe"]
+    ):
+        tag.decompose()
+    for a in transcript_soup.find_all("a", href=True):
+        a["href"] = urljoin(BYU_BASE, a["href"])
+    for img in transcript_soup.find_all("img", src=True):
+        img["src"] = urljoin(BYU_BASE, img["src"])
+    transcript_html = str(transcript_soup).strip()
+
+    if MAX_DESCRIPTION_CHARS:
+        text_only = clean_text(
+            BeautifulSoup(transcript_html, "html.parser").get_text(" ", strip=True)
+        )
+        if len(text_only) > MAX_DESCRIPTION_CHARS:
+            transcript_html = f"<p>{html.escape(text_only[:MAX_DESCRIPTION_CHARS])}…</p>"
+
+    return {
+        "title": title,
+        "url": url,
+        "conference": occasion,  # reused as the occasion label in the item
+        "pub_dt": pub_dt,
+        "pub_date": format_datetime(pub_dt, usegmt=True),
+        "description": transcript_html,
+        "audio": audio_url,
+        "guid": hashlib.sha256(url.encode("utf-8")).hexdigest(),
+    }
+
+
 def probe_enclosure(url):
     """HEAD the audio URL to validate it and get its byte length."""
     try:
@@ -284,7 +425,7 @@ def make_item(data):
         f"<p>Gordon B. Hinckley</p>"
         f"{data['description']}"
         f'<p><a href="{xml_escape(data["url"])}">'
-        f"Original talk on ChurchofJesusChrist.org</a></p>"
+        f"Original talk on {'BYU Speeches' if 'speeches.byu.edu' in data['url'] else 'ChurchofJesusChrist.org'}</a></p>"
     )
 
     return f"""
@@ -312,10 +453,11 @@ def build_feed(episodes):
     <title>Gordon B. Hinckley — General Conference Talks</title>
     <link>{xml_escape(ARCHIVE_URL)}</link>
     <description><![CDATA[
-      General Conference talks by President Gordon B. Hinckley,
-      compiled from the official archive of The Church of Jesus Christ
-      of Latter-day Saints. Includes the full transcript and links to
-      the original Church-hosted audio.
+      General Conference talks (1971-2007) and BYU devotionals,
+      firesides, and addresses (1958-2007) by President Gordon B.
+      Hinckley, compiled from the official Church archive and BYU
+      Speeches. Includes full transcripts where available and links
+      to the original hosted audio.
     ]]></description>
     <language>en-us</language>
     <itunes:author>Gordon B. Hinckley</itunes:author>
@@ -337,12 +479,11 @@ def build_feed(episodes):
 
 
 def main():
-    links = get_archive_links()
-
     episodes = []
     missing_audio = []
 
-    for uri, title in links:
+    # Source 1: General Conference talks.
+    for uri, title in get_archive_links():
         try:
             data = extract_metadata(uri, title)
             if not data["audio"]:
@@ -352,6 +493,18 @@ def main():
             time.sleep(SLEEP)
         except Exception as exc:  # noqa: BLE001
             print(f"ERROR processing {uri}: {exc}")
+
+    # Source 2: BYU Speeches.
+    for url in get_byu_links():
+        try:
+            data = extract_byu_metadata(url)
+            if not data["audio"]:
+                missing_audio.append((data["title"], url))
+                continue
+            episodes.append(data)
+            time.sleep(SLEEP)
+        except Exception as exc:  # noqa: BLE001
+            print(f"ERROR processing {url}: {exc}")
 
     # Deduplicate and sort chronologically, oldest first.
     episodes = list({ep["guid"]: ep for ep in episodes}.values())
