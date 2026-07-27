@@ -5,6 +5,9 @@ on:
     - cron: '0 */6 * * *'
   workflow_dispatch:
 
+concurrency:
+  group: feed-updates
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -29,4 +32,5 @@ jobs:
           git config --local user.name "GitHub Action"
           git add .
           git commit -m "Auto-update feeds" || echo "No changes"
+          git pull --rebase origin main
           git push
