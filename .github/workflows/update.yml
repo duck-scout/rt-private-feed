@@ -22,10 +22,7 @@ jobs:
 
       - name: Run RT scraper
         run: python scripts/build_feeds.py
-
-      - name: Run Hinckley archive builder
-        run: python scripts/build_hinckley.py      
-
+    
       - name: Commit and push changes
         run: |
           git config --local user.email "action@github.com"
