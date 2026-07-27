@@ -1,20 +1,32 @@
-import requests
-from bs4 import BeautifulSoup
-from datetime import datetime, timezone
-from email.utils import format_datetime
+"""Build a podcast RSS feed of Gordon B. Hinckley General Conference talks.
+
+Audio discovery uses the Church's own JSON content API (the same one the
+website's audio player calls), instead of regex-scraping the raw HTML:
+
+    /study/api/v3/language-pages/type/content?lang=eng&uri=<talk-uri>
+
+The API response contains meta.audio[].mediaUrl (a direct media2.ldscdn.org
+MP3) plus title, and a content body with the transcript HTML.
+"""
+
 import hashlib
 import html
 import json
-import os
 import re
 import time
+from datetime import datetime, timezone
+from email.utils import format_datetime
 from urllib.parse import urljoin, urlparse
+
+import requests
+from bs4 import BeautifulSoup
 
 BASE = "https://www.churchofjesuschrist.org"
 ARCHIVE_URL = (
     "https://www.churchofjesuschrist.org/study/general-conference/"
     "speakers/gordon-b-hinckley?lang=eng"
 )
+API_URL = BASE + "/study/api/v3/language-pages/type/content"
 
 PAGES_URL = "https://duck-scout.github.io/rt-private-feed"
 
@@ -27,14 +39,41 @@ HEADERS = {
 
 OUTPUT_FILE = "feed-gordon-b-hinckley.xml"
 
+# Set to an integer (e.g. 4000) to truncate transcripts in episode
+# descriptions and keep the feed XML small. None = full transcript.
+MAX_DESCRIPTION_CHARS = None
+
+# Politeness delay between requests, in seconds.
+SLEEP = 0.25
+
 session = requests.Session()
 session.headers.update(HEADERS)
 
 
-def fetch(url, timeout=30):
-    response = session.get(url, timeout=timeout)
-    response.raise_for_status()
-    return response.text
+def fetch_text(url, timeout=30, retries=2):
+    last_exc = None
+    for attempt in range(retries + 1):
+        try:
+            response = session.get(url, timeout=timeout)
+            response.raise_for_status()
+            return response.text
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+            time.sleep(1.0 + attempt)
+    raise last_exc
+
+
+def fetch_json(url, params=None, timeout=30, retries=2):
+    last_exc = None
+    for attempt in range(retries + 1):
+        try:
+            response = session.get(url, params=params, timeout=timeout)
+            response.raise_for_status()
+            return response.json()
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+            time.sleep(1.0 + attempt)
+    raise last_exc
 
 
 def clean_text(value):
@@ -44,274 +83,195 @@ def clean_text(value):
     return re.sub(r"\s+", " ", value).strip()
 
 
-def absolute_url(url):
-    return urljoin(BASE, url)
-
-
 def get_archive_links():
+    """Scrape the Hinckley speaker archive for talk-page URIs.
+
+    Returns a list of (uri, fallback_title) where uri looks like
+    /general-conference/2001/10/the-times-in-which-we-live
+    """
     print("Fetching Hinckley speaker archive...")
-    page = fetch(ARCHIVE_URL)
+    page = fetch_text(ARCHIVE_URL)
     soup = BeautifulSoup(page, "html.parser")
 
+    pattern = re.compile(r"^/study(/general-conference/\d{4}/(?:0[1-9]|1[0-2])/[^/]+)$")
+
     links = {}
-
-    pattern = re.compile(
-        r"^/study/general-conference/\d{4}/"
-        r"(?:0[1-9]|1[0-2])/"
-    )
-
     for a in soup.find_all("a", href=True):
         href = a["href"].split("?")[0]
-
-        if not pattern.match(href):
+        match = pattern.match(href)
+        if not match:
             continue
 
-        # Ignore session/navigation pages.
-        if href.endswith("-session") or href.endswith("/"):
+        uri = match.group(1)
+
+        # Skip session/contents pages, keep actual talk pages.
+        if uri.endswith("-session") or uri.endswith("/"):
             continue
 
-        full = absolute_url(href)
         title = clean_text(a.get_text(" ", strip=True))
+        links[uri] = title
 
-        if title and full:
-            links[full] = title
-
-    result = list(links.items())
-
+    result = sorted(links.items())
     print(f"Found {len(result)} possible Hinckley talk pages.")
-
     return result
 
 
-def extract_audio_urls(page_html):
-    candidates = []
+def find_audio_urls(obj):
+    """Recursively walk API JSON and collect every mp3/m4a URL in it."""
+    found = []
 
-    # Direct MP3/M4A URLs.
-    patterns = [
-        r'https?://[^"\'>\s]+?\.(?:mp3|m4a)(?:\?[^"\'>\s]*)?',
-        r'//[^"\'>\s]+?\.(?:mp3|m4a)(?:\?[^"\'>\s]*)?',
-    ]
+    def walk(node):
+        if isinstance(node, dict):
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for value in node:
+                walk(value)
+        elif isinstance(node, str):
+            if re.search(r"\.(?:mp3|m4a)(?:\?|$)", node, re.IGNORECASE):
+                url = node
+                if url.startswith("//"):
+                    url = "https:" + url
+                if url.startswith("http") and url not in found:
+                    found.append(url)
 
-    for pattern in patterns:
-        for match in re.findall(pattern, page_html, re.IGNORECASE):
-            url = match
-
-            if url.startswith("//"):
-                url = "https:" + url
-
-            url = html.unescape(url)
-            url = url.replace("\\/", "/")
-
-            if url not in candidates:
-                candidates.append(url)
-
-    # Look for escaped URLs inside JSON.
-    decoded = page_html.replace("\\u002F", "/").replace("\\/", "/")
-
-    for match in re.findall(
-        r'https?://[^"\'>\s]+?\.(?:mp3|m4a)(?:\?[^"\'>\s]*)?',
-        decoded,
-        re.IGNORECASE,
-    ):
-        if match not in candidates:
-            candidates.append(match)
+    walk(obj)
 
     # Prefer Church-owned media domains.
-    preferred = []
-
-    for url in candidates:
-        host = urlparse(url).netloc.lower()
-
-        if (
-            "ldscdn.org" in host
-            or "churchofjesuschrist.org" in host
-            or "churchofjesuschrist.net" in host
-        ):
-            preferred.append(url)
-
-    if preferred:
-        return preferred
-
-    return candidates
-
-
-def extract_duration(soup, page_html):
-    # Current Church page displays durations such as "19:05".
-    text = soup.get_text(" ", strip=True)
-
-    # Search near the beginning first to avoid accidentally
-    # finding scripture timestamps later in the transcript.
-    beginning = text[:5000]
-
-    matches = re.findall(
-        r"(?<!\d)(\d{1,2}):([0-5]\d)(?!\d)",
-        beginning
-    )
-
-    if matches:
-        minutes, seconds = matches[0]
-        return f"{int(minutes)}:{seconds}"
-
-    # JSON-style duration values, if present.
-    duration_match = re.search(
-        r'"duration"\s*:\s*"?(?:(\d+):)?(\d{1,3})(?::(\d{2}))?"?',
-        page_html,
-        re.IGNORECASE,
-    )
-
-    if duration_match:
-        groups = duration_match.groups()
-
-        if groups[2] is not None:
-            hours = int(groups[1])
-            minutes = int(groups[0] or 0)
-            seconds = int(groups[2])
-            return f"{hours}:{minutes:02d}:{seconds:02d}"
-
-    return None
-
-
-def extract_metadata(url, fallback_title):
-    print(f"Processing: {url}")
-
-    page_html = fetch(url)
-    soup = BeautifulSoup(page_html, "html.parser")
-
-    # Title
-    h1 = soup.find("h1")
-    title = clean_text(h1.get_text(" ", strip=True)) if h1 else fallback_title
-
-    if not title:
-        title = fallback_title or "Gordon B. Hinckley"
-
-    # Description / transcript.
-    #
-    # The Church's current pages expose the entire transcript in the HTML.
-    # We keep it as HTML so the podcast client has useful formatting.
-    transcript_container = None
-
-    possible_classes = [
-        "article-content",
-        "article__body",
-        "body-block",
-        "study-content",
-    ]
-
-    for class_name in possible_classes:
-        transcript_container = soup.find(
-            class_=re.compile(re.escape(class_name), re.IGNORECASE)
+    preferred = [
+        u for u in found
+        if any(
+            d in urlparse(u).netloc.lower()
+            for d in ("ldscdn.org", "churchofjesuschrist.org", "churchofjesuschrist.net")
         )
-        if transcript_container:
-            break
+    ]
+    return preferred or found
 
-    if transcript_container:
-        transcript_html = transcript_container.decode_contents()
+
+def find_first_string(obj, key_names):
+    """Recursively find the first non-empty string value under any of the
+    given key names in nested API JSON."""
+
+    def walk(node):
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if key in key_names and isinstance(value, str) and value.strip():
+                    return value
+                result = walk(value)
+                if result:
+                    return result
+        elif isinstance(node, list):
+            for value in node:
+                result = walk(value)
+                if result:
+                    return result
+        return None
+
+    return walk(obj)
+
+
+def extract_transcript_html(api_data, uri):
+    """Get the transcript HTML, preferring the API body, falling back to
+    scraping the public page."""
+    body = find_first_string(api_data, {"body", "content", "html"})
+
+    if body and "<" in body:
+        transcript_html = body
     else:
-        # Fallback: find the main article.
-        article = soup.find("article")
-
+        # Fallback: scrape the public page.
+        page_html = fetch_text(f"{BASE}/study{uri}?lang=eng")
+        soup = BeautifulSoup(page_html, "html.parser")
+        article = soup.find("article") or soup.find("main")
         if article:
             transcript_html = article.decode_contents()
         else:
-            # Final fallback to the meta description.
             meta = soup.find("meta", attrs={"name": "description"})
             desc = meta.get("content", "") if meta else ""
             transcript_html = f"<p>{html.escape(desc)}</p>"
 
-    # Remove obvious navigation/script junk.
+    # Strip scripts/nav junk and resolve relative links.
     transcript_soup = BeautifulSoup(transcript_html, "html.parser")
-
-    for tag in transcript_soup.find_all(
-        ["script", "style", "nav", "form", "button"]
-    ):
+    for tag in transcript_soup.find_all(["script", "style", "nav", "form", "button", "video", "audio", "iframe"]):
         tag.decompose()
+    for a in transcript_soup.find_all("a", href=True):
+        a["href"] = urljoin(BASE, a["href"])
+    for img in transcript_soup.find_all("img", src=True):
+        img["src"] = urljoin(BASE, img["src"])
 
-    transcript_html = str(transcript_soup).strip()
+    return str(transcript_soup).strip()
 
-    # Date from URL. Church conference URLs are YYYY/MM.
-    match = re.search(
-        r"/general-conference/(\d{4})/(0[1-9]|1[0-2])/",
-        url
-    )
 
+def extract_metadata(uri, fallback_title):
+    print(f"Processing: {uri}")
+
+    api_data = fetch_json(API_URL, params={"lang": "eng", "uri": uri})
+
+    # Title
+    title = None
+    meta = api_data.get("meta") if isinstance(api_data, dict) else None
+    if isinstance(meta, dict):
+        title = meta.get("title")
+    if not title:
+        title = find_first_string(api_data, {"title"})
+    title = clean_text(title) or fallback_title or "Gordon B. Hinckley"
+
+    # Audio
+    audio_urls = find_audio_urls(api_data)
+    audio_url = audio_urls[0] if audio_urls else None
+    if not audio_url:
+        print(f"  WARNING: No audio URL in API response for {uri}")
+        # Diagnostic: show what keys the API actually returned so a future
+        # structure change is easy to debug from the Actions log.
+        if isinstance(api_data, dict):
+            print(f"  API top-level keys: {sorted(api_data.keys())}")
+            if isinstance(meta, dict):
+                print(f"  meta keys: {sorted(meta.keys())}")
+
+    # Date from URI (YYYY/MM). tzinfo=utc fixes the usegmt error.
+    match = re.search(r"/general-conference/(\d{4})/(0[1-9]|1[0-2])/", uri)
     if match:
-        year = int(match.group(1))
-        month = int(match.group(2))
-        day = 1
-
-        # General Conference dates are approximately:
-        # April = first Saturday of April
-        # October = first Saturday of October.
-        # We use the first day of the month for feed sorting only,
-        # then preserve the conference label in the description.
-        pub_dt = datetime(year, month, day, tzinfo=timezone.utc)
+        pub_dt = datetime(int(match.group(1)), int(match.group(2)), 1, tzinfo=timezone.utc)
     else:
-        pub_dt = datetime(1970, 1, 1)
+        pub_dt = datetime(1970, 1, 1, tzinfo=timezone.utc)
 
-    # Conference label.
     conference = (
         f"{'April' if pub_dt.month == 4 else 'October'} "
         f"{pub_dt.year} General Conference"
     )
 
-    # Duration.
-    duration = extract_duration(soup, page_html)
+    # Transcript
+    transcript_html = extract_transcript_html(api_data, uri)
+    if MAX_DESCRIPTION_CHARS:
+        text_only = clean_text(BeautifulSoup(transcript_html, "html.parser").get_text(" ", strip=True))
+        if len(text_only) > MAX_DESCRIPTION_CHARS:
+            transcript_html = f"<p>{html.escape(text_only[:MAX_DESCRIPTION_CHARS])}…</p>"
 
-    # Artwork.
-    og_image = soup.find("meta", property="og:image")
-    artwork = og_image.get("content") if og_image else None
-
-    # Audio.
-    audio_urls = extract_audio_urls(page_html)
-
-    audio_url = audio_urls[0] if audio_urls else None
-
-    if not audio_url:
-        print("  WARNING: No audio URL found.")
-
-    # GUID based on canonical Church URL.
-    guid = hashlib.sha256(url.encode("utf-8")).hexdigest()
-
-    # Plain text version for description fallback/search.
-    transcript_text = clean_text(
-        transcript_soup.get_text(" ", strip=True)
-    )
+    canonical_url = f"{BASE}/study{uri}?lang=eng"
 
     return {
         "title": title,
-        "url": url,
+        "url": canonical_url,
         "conference": conference,
         "pub_dt": pub_dt,
         "pub_date": format_datetime(pub_dt, usegmt=True),
         "description": transcript_html,
-        "transcript_text": transcript_text,
-        "duration": duration,
         "audio": audio_url,
-        "artwork": artwork,
-        "guid": guid,
+        "guid": hashlib.sha256(canonical_url.encode("utf-8")).hexdigest(),
     }
 
 
-def duration_to_seconds(duration):
-    if not duration:
-        return None
-
-    parts = duration.split(":")
-
+def probe_enclosure(url):
+    """HEAD the audio URL to validate it and get its byte length."""
     try:
-        if len(parts) == 2:
-            return int(parts[0]) * 60 + int(parts[1])
-
-        if len(parts) == 3:
-            return (
-                int(parts[0]) * 3600
-                + int(parts[1]) * 60
-                + int(parts[2])
-            )
-    except ValueError:
-        pass
-
-    return None
+        response = session.head(url, timeout=30, allow_redirects=True)
+        if response.status_code == 200:
+            length = response.headers.get("Content-Length")
+            ctype = response.headers.get("Content-Type", "audio/mpeg")
+            return int(length) if length and length.isdigit() else 0, ctype
+        print(f"  WARNING: enclosure HEAD returned {response.status_code}: {url}")
+    except Exception as exc:  # noqa: BLE001
+        print(f"  WARNING: enclosure HEAD failed ({exc}): {url}")
+    return 0, "audio/mpeg"
 
 
 def xml_escape(value):
@@ -319,23 +279,6 @@ def xml_escape(value):
 
 
 def make_item(data):
-    duration_xml = ""
-
-    if data["duration"]:
-        duration_xml = (
-            f"<itunes:duration>"
-            f"{xml_escape(data['duration'])}"
-            f"</itunes:duration>"
-        )
-
-    artwork_xml = ""
-
-    if data["artwork"]:
-        artwork_xml = (
-            f'<itunes:image href="{xml_escape(data["artwork"])}"/>'
-        )
-
-    # Include a short metadata header before the transcript.
     description = (
         f"<p><strong>{xml_escape(data['conference'])}</strong></p>"
         f"<p>Gordon B. Hinckley</p>"
@@ -346,37 +289,19 @@ def make_item(data):
 
     return f"""
     <item>
-      <title>{xml_escape(data["title"])}</title>
+      <title>{xml_escape(data["title"])} ({xml_escape(data["conference"])})</title>
       <itunes:author>Gordon B. Hinckley</itunes:author>
       <description><![CDATA[{description}]]></description>
       <pubDate>{data["pub_date"]}</pubDate>
       <guid isPermaLink="false">{data["guid"]}</guid>
       <link>{xml_escape(data["url"])}</link>
-      <enclosure
-        url="{xml_escape(data["audio"])}"
-        type="audio/mpeg"
-      />
-      {duration_xml}
-      {artwork_xml}
+      <enclosure url="{xml_escape(data["audio"])}" length="{data["length"]}" type="{xml_escape(data["mime"])}"/>
       <itunes:episodeType>full</itunes:episodeType>
     </item>
     """
 
 
 def build_feed(episodes):
-    # Use the first available Church artwork as the feed artwork.
-    channel_art = None
-
-    for episode in episodes:
-        if episode.get("artwork"):
-            channel_art = episode["artwork"]
-            break
-
-    if not channel_art:
-        channel_art = (
-            f"{PAGES_URL}/art-gordon-b-hinckley.jpg"
-        )
-
     items = "\n".join(make_item(ep) for ep in episodes)
 
     rss = f"""<?xml version="1.0" encoding="UTF-8"?>
@@ -385,19 +310,13 @@ def build_feed(episodes):
 
   <channel>
     <title>Gordon B. Hinckley — General Conference Talks</title>
-
-    <link>
-      https://www.churchofjesuschrist.org/study/general-conference/
-      speakers/gordon-b-hinckley?lang=eng
-    </link>
-
+    <link>{xml_escape(ARCHIVE_URL)}</link>
     <description><![CDATA[
       General Conference talks by President Gordon B. Hinckley,
       compiled from the official archive of The Church of Jesus Christ
       of Latter-day Saints. Includes the full transcript and links to
       the original Church-hosted audio.
     ]]></description>
-
     <language>en-us</language>
     <itunes:author>Gordon B. Hinckley</itunes:author>
     <itunes:owner>
@@ -405,7 +324,7 @@ def build_feed(episodes):
     </itunes:owner>
     <itunes:explicit>false</itunes:explicit>
     <itunes:type>episodic</itunes:type>
-    <itunes:image href="{xml_escape(channel_art)}"/>
+    <itunes:image href="{xml_escape(PAGES_URL + '/art-gordon-b-hinckley.jpg')}"/>
 
     {items}
 
@@ -421,53 +340,53 @@ def main():
     links = get_archive_links()
 
     episodes = []
+    missing_audio = []
 
-    for url, title in links:
+    for uri, title in links:
         try:
-            data = extract_metadata(url, title)
-
+            data = extract_metadata(uri, title)
             if not data["audio"]:
-                print(f"SKIPPING — no audio: {url}")
+                missing_audio.append((title, uri))
                 continue
-
             episodes.append(data)
+            time.sleep(SLEEP)
+        except Exception as exc:  # noqa: BLE001
+            print(f"ERROR processing {uri}: {exc}")
 
-            # Be polite to the Church's servers.
-            time.sleep(0.25)
-
-        except Exception as exc:
-            print(f"ERROR processing {url}: {exc}")
-
-    # Deduplicate.
-    unique = {}
-
-    for episode in episodes:
-        unique[episode["guid"]] = episode
-
-    episodes = list(unique.values())
-
-    # Sort chronologically, oldest first.
+    # Deduplicate and sort chronologically, oldest first.
+    episodes = list({ep["guid"]: ep for ep in episodes}.values())
     episodes.sort(key=lambda x: x["pub_dt"])
 
-    print(f"Successfully collected {len(episodes)} audio talks.")
+    print(f"\nSuccessfully collected {len(episodes)} audio talks.")
+    if missing_audio:
+        print(f"Skipped {len(missing_audio)} pages with no audio:")
+        for title, uri in missing_audio[:20]:
+            print(f"  - {title}: {uri}")
 
     if not episodes:
         raise RuntimeError(
             "No Hinckley audio episodes were found. "
-            "The Church's audio URL structure may have changed."
+            "The Church's content API structure may have changed — "
+            "check the 'API top-level keys' diagnostics above."
         )
 
-    # Print useful diagnostics.
     print("\nFirst five audio URLs:")
     for episode in episodes[:5]:
-        print(
-            f"  {episode['title']}: "
-            f"{episode['audio']}"
-        )
+        print(f"  {episode['title']}: {episode['audio']}")
+
+    # Validate enclosures + get byte lengths (best effort).
+    print("\nProbing enclosure URLs...")
+    for episode in episodes:
+        episode["length"], episode["mime"] = probe_enclosure(episode["audio"])
+        time.sleep(SLEEP / 2)
+
+    dead = [ep for ep in episodes if ep["length"] == 0]
+    if dead:
+        print(f"\nNOTE: {len(dead)} enclosures did not return a Content-Length "
+              "(they may still play — test one in a browser).")
 
     build_feed(episodes)
-
-    print(f"\nCreated {OUTPUT_FILE}")
+    print(f"\nCreated {OUTPUT_FILE} with {len(episodes)} episodes.")
 
 
 if __name__ == "__main__":
